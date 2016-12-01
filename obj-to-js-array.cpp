@@ -41,7 +41,8 @@ int tokenize(T out[], const std::string& line, // The line to tokenize
     return count;
 }
 
-// Adds the data at the location to the given buffer
+// Conditionally reads the vertex attribute data at the given location in
+// the given reference data, and adds it to the buffer
 bool addDataToBuffer(std::vector<double>& buffer, unsigned int location,
                      const std::vector<Vec3>& refData, bool disable = false,
                      bool is2D = false)
@@ -184,61 +185,90 @@ int objToJs(std::istream& in, std::vector<double>& vertexData, std::vector<doubl
     return stride;
 }
 
+// Parses arguments into a dictionary and strips out any '=\d+' suffix into
+// the value of the dictionary entry
+void parseArguments(std::unordered_map<std::string, int>& parsedArgs,
+                    int numArgs, char** args, int offset = 1)
+{
+    for (int i = offset; i < numArgs; ++i) {
+        std::string arg(args[i]);
+        // Skip non-arguments
+        if (arg[0] != '-' || arg[1] != '-')
+            continue;
+        // Try parsing the digit
+        int digit = 1;
+        size_t eqIndex = arg.find_last_of('=');
+        if (eqIndex != std::string::npos) {
+            digit = std::atoi(arg.substr(eqIndex + 1).c_str());
+        }
+        // Add the argument to the dictionary
+        parsedArgs[arg.substr(0, eqIndex)] = digit;
+    }
+}
+
 int main(int argc, char* argv[])
 {
-    std::ifstream inputFile;
-    std::ofstream outputFile;
-    // Read input file from first argument
-    if (argc > 1) {
-        inputFile.open(argv[1], std::ifstream::in);
-        if (!inputFile.is_open()) {
-            std::cerr << "Could not open file " << argv[1] << std::endl;
-            return -1;
+    std::fstream files[2];
+    // Try to get the first two arguments as files
+    for (int i = 0; i < 2; ++i) {
+        // Try to read the file if it's not an argument
+        char* a = argc > i+1 ? argv[i+1] : 0;
+        if (a && a[0] != '-' && a[1] != '-') {
+            // Read from first, write to second
+            files[i].open(a, !i ? std::fstream::in : std::fstream::out);
+            if (!files[i].is_open()) {
+                std::cerr << "Could not open file " << a << std::endl;
+                return -1;
+            }
         }
     }
-    // Read output file from second argument
-    if (argc > 2) {
-        outputFile.open(argv[2], std::ofstream::out);
-        if (!outputFile.is_open()) {
-            std::cerr << "Could not open file " << argv[2] << std::endl;
-            return -1;
-        }
-    }
-    // Read remaining arguments
-    std::unordered_map<std::string, bool> args;
-    for (int i = 3; i < argc; ++i)
-        args[argv[i]] = i;
-    bool disableTexture = args.count("--no-texture");
-    bool disableNormal = args.count("--no-normal");
-    std::istream& input = argc > 1 ? inputFile : std::cin;
-    std::ostream& output = argc > 2 ? outputFile : std::cout;
+    std::istream& input = files[0].is_open() ? files[0] : std::cin;
+    std::ostream& output = files[1].is_open() ? files[1] : std::cout;
 
+    // Parse remaining arguments
+    std::unordered_map<std::string, int> parsedArgs;
+    parseArguments(parsedArgs, argc, argv);
+
+    // Configure program from arguments
+    bool disableTexture = parsedArgs.count("--no-texture");
+    bool disableNormal = parsedArgs.count("--no-normal");
+    int tabLevel = parsedArgs.count("--indent") ? parsedArgs["--indent"] : 0;
+    bool useTabs = parsedArgs.count("--use-tabs");
+    int precision = parsedArgs.count("--precision") ? parsedArgs["--precision"] : 5;
+
+    // Read and parse the obj file
     std::vector<double> vbo, ebo;
-    int stride = objToJs(input, vbo, ebo, disableTexture, disableNormal);
-    if (stride <= 0) {
+    int parseResult = objToJs(input, vbo, ebo, disableTexture, disableNormal);
+    if (parseResult <= 0)
         return -1;
-    }
 
-    output.precision(5);
-    output << "let vbo = [";
-    for (int i = 0, l = (int)vbo.size(); i < l; ++i) {
+    // Configure output
+    std::string indent(useTabs ? tabLevel : 4*tabLevel, useTabs ? '\t' : ' ');
+    output.precision(precision);
+
+    // Output the vertex buffer array
+    size_t stride = (size_t)parseResult;
+    output << indent << "// Vertex Buffer Object\n";
+    for (size_t i = 0, N = (size_t)vbo.size(); i < N; ++i) {
         if (i % stride == 0)
-            output << "\n   ";
-        output << ' ' << vbo[i] << ',';
+            output << indent;
+        output << vbo[i] << ',' << (i % stride == stride - 1 ? '\n' : ' ');
     }
-    output << "\n];\n\n";
-
-    output << "let ebo = [";
-    for (int i = 0, l = (int)ebo.size(); i < l; ++i) {
-        if (i % 3 == 0)
-            output << "\n   ";
-        output << ' ' << ebo[i] << ',';
+    output << std::endl;
+    // Output the element index array
+    stride = 3;
+    output << indent << "// Element Index Array\n";
+    for (size_t i = 0, N = (size_t)ebo.size(); i < N; ++i) {
+        if (i % stride == 0)
+            output << indent;
+        output << ebo[i] << ','  << (i % stride == stride - 1 ? '\n' : ' ');
     }
-    output << "\n];\n\n";
+    output << std::endl;
 
-    if (inputFile.is_open())
-        inputFile.close();
-    if (outputFile.is_open())
-        outputFile.close();
+    // Close resources
+    for (auto& file : files) {
+        if (file.is_open())
+            file.close();
+    }
     return 0;
 }
