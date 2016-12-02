@@ -3,7 +3,9 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <utility>
 #include <unordered_map>
+#include <algorithm>
 
 // Helper types for internal data representation
 struct Vec3 { double x, y, z; };
@@ -187,6 +189,43 @@ bool objToJs(std::istream& in, std::vector<Vertex>& vertexData, std::vector<unsi
     return true;
 }
 
+// Sorts the data and remaps the indices such that the data is sorted by
+// position Z then X value.
+void sortZX(std::vector<Vertex>& data, std::vector<unsigned int>& indices)
+{
+    // Double comparison
+    auto isEqual = [](double a, double b) {
+        return std::abs(a - b) < 1e-10;
+    };
+    unsigned int N = data.size();
+
+    // Build an indexed copy of the data
+    typedef std::pair<unsigned int, Vertex> IndexedVert;
+    std::vector<IndexedVert> sortedData(N);
+    for (unsigned int i = 0; i < N; ++i) {
+        sortedData[i] = std::make_pair(i, data[i]);
+    }
+
+    // Sort the data by z, x
+    std::sort(sortedData.begin(), sortedData.end(), [&isEqual](IndexedVert& v1, IndexedVert& v2) {
+        Vec3 &p1 = v1.second.p, &p2 = v2.second.p;
+        return p1.z < p2.z || (isEqual(p1.z, p2.z) && p1.x < p2.x);
+    });
+
+    // Build the index mapping and copy sorted data
+    std::vector<unsigned int> mapping(N);
+    for (unsigned int i = 0; i < N; ++i) {
+        auto& pair = sortedData[i];
+        mapping[pair.first] = i;
+        data[i] = pair.second;
+    }
+
+    // Write the mapped indices
+    for (unsigned int& i : indices) {
+        i = mapping[i];
+    }
+}
+
 // Parses arguments into a dictionary and strips out any '=\d+' suffix into
 // the value of the dictionary entry
 void parseArguments(std::unordered_map<std::string, int>& parsedArgs,
@@ -237,12 +276,17 @@ int main(int argc, char* argv[])
     int tabLevel = parsedArgs.count("--indent") ? parsedArgs["--indent"] : 0;
     bool useTabs = parsedArgs.count("--use-tabs");
     int precision = parsedArgs.count("--precision") ? parsedArgs["--precision"] : 5;
+    bool doSortZX = parsedArgs.count("--sort-zx");
 
     // Read and parse the obj file
     std::vector<Vertex> vbo;
     std::vector<unsigned int> ebo;
     if (!objToJs(input, vbo, ebo, disableTexture, disableNormal))
         return -1;
+
+    // Do post processing of results
+    if (doSortZX)
+        sortZX(vbo, ebo);
 
     // Configure output
     std::string indent(useTabs ? tabLevel : 4*tabLevel, useTabs ? '\t' : ' ');
