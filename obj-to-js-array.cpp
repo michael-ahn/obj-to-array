@@ -7,6 +7,24 @@
 
 // Helper types for internal data representation
 struct Vec3 { double x, y, z; };
+struct Vec2 { double x, y; };
+struct Vertex {
+    bool hasNorm, hasUV;
+    Vec3 p;
+    Vec3 n;
+    Vec2 t;
+};
+
+// Write the vertex to the given stream
+std::ostream& operator<<(std::ostream& out, const Vertex& v)
+{
+    out << v.p.x << ", " << v.p.y << ", " << v.p.z;
+    if (v.hasNorm)
+        out << ", " << v.n.x << ", " << v.n.y << ", " << v.n.z;
+    if (v.hasUV)
+        out << ", " << v.t.x << ", " << v.t.y;
+    return out;
+}
 
 // Tokenize the given line into tokens. Returns the number of tokens parsed,
 // or -1 if there was an invalid parsing of string to T.
@@ -41,28 +59,12 @@ int tokenize(T out[], const std::string& line, // The line to tokenize
     return count;
 }
 
-// Conditionally reads the vertex attribute data at the given location in
-// the given reference data, and adds it to the buffer
-bool addDataToBuffer(std::vector<double>& buffer, unsigned int location,
-                     const std::vector<Vec3>& refData, bool disable = false,
-                     bool is2D = false)
-{
-    if (location > 0 && !disable) {
-        if (location > refData.size())
-            return false;
-        const Vec3& v = refData[location - 1];
-        buffer.push_back(v.x); buffer.push_back(v.y);
-        if (!is2D)
-            buffer.push_back(v.z);
-    }
-    return true;
-}
-
 // Parses the next vertex attribute by the first two letters.
-bool parseVertexAttribute(std::istream& in, std::vector<Vec3>& parsedAttribs,
+template <typename V, unsigned int D>
+bool parseVertexAttribute(std::istream& in, std::vector<V>& parsedAttribs,
                           char category, char type, std::string& prevLine)
 {
-    double values[3];
+    double values[D];
     do {
         // Skip blank lines and comments
         if (prevLine.length() < 2 || prevLine[0] == '#')
@@ -74,7 +76,10 @@ bool parseVertexAttribute(std::istream& in, std::vector<Vec3>& parsedAttribs,
         if (tokenize(values, prevLine) <= 0)
             return false;
         // Write the parsed attribute
-        parsedAttribs.push_back({values[0], values[1], values[2]});
+        V v; double* vptr = &v.x;
+        for (unsigned int i = 0; i < D; ++i)
+            *(vptr + i) = values[i];
+        parsedAttribs.push_back(v);
     } while (std::getline(in, prevLine));
     return true;
 }
@@ -82,50 +87,49 @@ bool parseVertexAttribute(std::istream& in, std::vector<Vec3>& parsedAttribs,
 // Reads a .obj file and parses the vertex positions, texture coordinates,
 // normals, and triangulated faces.
 // Returns true on success, otherwise false.
-int objToJs(std::istream& in, std::vector<double>& vertexData, std::vector<double>& elementData,
+bool objToJs(std::istream& in, std::vector<Vertex>& vertexData, std::vector<unsigned int>& elementData,
              bool disableTexture = false, bool disableNormal = false)
 {
     std::string line;
 
     // Read vertex position data
     std::vector<Vec3> positions;
-    if (!parseVertexAttribute(in, positions, 'v', ' ', line)) {
+    if (!parseVertexAttribute<Vec3,3>(in, positions, 'v', ' ', line)) {
         std::cerr << "Malformed vertex position: " << line << std::endl;
-        return -1;
+        return false;
     } else if (!positions.size()) {
         std::cerr << "Could not parse any vertex positions" << std::endl;
-        return -1;
+        return false;
     } else if (in.eof()) {
         std::cerr << "Unexpected end of file after vertex positions" << std::endl;
-        return -1;
+        return false;
     }
 
     // Read vertex texture coordinate data
-    std::vector<Vec3> texcoords;
-    if (!parseVertexAttribute(in, texcoords, 'v', 't', line)) {
+    std::vector<Vec2> texcoords;
+    if (!parseVertexAttribute<Vec2,2>(in, texcoords, 'v', 't', line)) {
         std::cerr << "Malformed texture coordinates: " << line << std::endl;
-        return -1;
+        return false;
     } else if (in.eof()) {
         std::cerr << "Unexpected end of file after texture coordinates" << std::endl;
-        return -1;
+        return false;
     }
 
     // Read vertex normal data
     std::vector<Vec3> normals;
-    if (!parseVertexAttribute(in, normals, 'v', 'n', line)) {
+    if (!parseVertexAttribute<Vec3,3>(in, normals, 'v', 'n', line)) {
         std::cerr << "Malformed vertex normals: " << line << std::endl;
-        return -1;
+        return false;
     } else if (in.eof()) {
         std::cerr << "Unexpected end of file after vertex normals" << std::endl;
-        return -1;
+        return false;
     }
 
     std::string vertices[4];   // Holds 1 triangle or quad
     std::string* triangles[6]; // Holds up to two triangles
     unsigned int locations[3];
 
-    std::unordered_map<std::string, int> indexCache;
-    int index = 0;
+    std::unordered_map<std::string, unsigned int> indexCache;
 
     do {
         // Skip lines that do not specify texture coordinates
@@ -136,17 +140,18 @@ int objToJs(std::istream& in, std::vector<double>& vertexData, std::vector<doubl
         int deg = tokenize(vertices, line, 4);
         if (deg != 3 && deg != 4) {
             std::cerr << "All faces must be triangles or quads: " << line << std::endl;
-            return -1;
+            return false;
         }
 
-        int n = 3;
+        // Get the triangles in this face
+        int vertexCount = 3;
         triangles[0] = vertices; triangles[1] = vertices + 1; triangles[2] = vertices + 2;
         if (deg == 4) { // Triangulate quads
-            n = 6;
+            vertexCount = 6;
             triangles[3] = vertices; triangles[4] = vertices + 2; triangles[5] = vertices + 3;
         }
 
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < vertexCount; ++i) {
             const std::string& v = *(triangles[i]);
 
             // Search for an already created index for this vertex
@@ -159,30 +164,27 @@ int objToJs(std::istream& in, std::vector<double>& vertexData, std::vector<doubl
                 int attrs = tokenize(locations, v, 3, false, '/');
                 if (attrs <= 0) {
                     std::cerr << "Malformed vertex " << v << std::endl;
-                    return -1;
+                    return false;
                 }
 
-                // Write vertex data
-                if (!addDataToBuffer(vertexData, locations[0], positions) ||
-                    (attrs > 1 && !addDataToBuffer(vertexData, locations[1], texcoords, disableTexture, true)) ||
-                    (attrs > 2 && !addDataToBuffer(vertexData, locations[2], normals, disableNormal))) {
-                    std::cerr << "Vertex data out of bounds: " << v << std::endl;
-                    return -1;
-                }
+                // Get the vertex data
+                Vec3 pos = positions[locations[0] - 1];
+                Vec2 tex;
+                if (locations[1] > 0)
+                    tex = texcoords[locations[1] - 1];
+                Vec3 norm;
+                if (locations[2] > 0)
+                    norm = normals[locations[2] - 1];
 
                 // Enter and cache the vertex
-                elementData.push_back(index);
-                indexCache[v] = index++;
+                elementData.push_back(vertexData.size());
+                indexCache[v] = vertexData.size();
+                vertexData.push_back({!disableNormal, !disableTexture, pos, norm, tex});
             }
         }
     } while (std::getline(in, line));
 
-    int stride = 3;
-    if (texcoords.size() && !disableTexture)
-        stride += 2;
-    if (normals.size() && !disableNormal)
-        stride += 3;
-    return stride;
+    return true;
 }
 
 // Parses arguments into a dictionary and strips out any '=\d+' suffix into
@@ -237,9 +239,9 @@ int main(int argc, char* argv[])
     int precision = parsedArgs.count("--precision") ? parsedArgs["--precision"] : 5;
 
     // Read and parse the obj file
-    std::vector<double> vbo, ebo;
-    int parseResult = objToJs(input, vbo, ebo, disableTexture, disableNormal);
-    if (parseResult <= 0)
+    std::vector<Vertex> vbo;
+    std::vector<unsigned int> ebo;
+    if (!objToJs(input, vbo, ebo, disableTexture, disableNormal))
         return -1;
 
     // Configure output
@@ -247,21 +249,17 @@ int main(int argc, char* argv[])
     output.precision(precision);
 
     // Output the vertex buffer array
-    size_t stride = (size_t)parseResult;
     output << indent << "// Vertex Buffer Object\n";
-    for (size_t i = 0, N = (size_t)vbo.size(); i < N; ++i) {
-        if (i % stride == 0)
-            output << indent;
-        output << vbo[i] << ',' << (i % stride == stride - 1 ? '\n' : ' ');
+    for (auto& v : vbo) {
+        output << indent << v << ",\n";
     }
     output << std::endl;
     // Output the element index array
-    stride = 3;
     output << indent << "// Element Index Array\n";
     for (size_t i = 0, N = (size_t)ebo.size(); i < N; ++i) {
-        if (i % stride == 0)
+        if (i % 3 == 0)
             output << indent;
-        output << ebo[i] << ','  << (i % stride == stride - 1 ? '\n' : ' ');
+        output << ebo[i] << ','  << (i % 3 == 2 ? '\n' : ' ');
     }
     output << std::endl;
 
